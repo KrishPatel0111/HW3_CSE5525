@@ -59,8 +59,8 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
     gt_sql_path = os.path.join(f'data/dev.sql')
     gt_record_path = os.path.join(f'records/dev_gt_records.pkl')
-    model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
-    model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
+    model_sql_path = os.path.join(f'results/t5_{model_type}_{args.experiment_name}_dev.sql')
+    model_record_path = os.path.join(f'records/t5_{model_type}_{args.experiment_name}_dev.pkl')
     for epoch in range(args.max_n_epochs):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
         print(f"Epoch {epoch}: Average train loss was {tr_loss}")
@@ -172,20 +172,42 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
             generated_ids = model.generate(
                 input_ids=encoder_input,
                 attention_mask=encoder_mask,
-                max_length=args.max_gen_length,
-                num_beams=args.num_beams
+                early_stopping=True,
+                max_length = 512,
+                num_beams= 4,
+                decoder_start_token_id=initial_decoder[0].item()
             )
             
             for gen_ids in generated_ids:
                 query = tokenizer.decode(gen_ids, skip_special_tokens=True)
                 sql_results.append(query)
-                
+
+    print("\n=== DEBUGGING: First 10 Generated Queries ===")
+    for i in range(min(10, len(sql_results))):
+        print(f"{i+1}. Generated: [{sql_results[i]}]")
+
+    with open(gt_sql_pth, 'r') as f:
+        gt_queries = [line.strip() for line in f.readlines()]
+    print("\n=== Ground Truth Queries (first 10) ===")
+    for i in range(min(10, len(gt_queries))):
+        print(f"{i+1}. GT: [{gt_queries[i]}]")
+    print("=" * 60 + "\n")
+
     save_queries_and_records(sql_results, model_sql_path, model_record_path)            
     avg_loss = total_loss / total_tokens if total_tokens > 0 else 0
      
     sql_em, record_em, record_f1, error_msgs = compute_metrics(
         gt_sql_pth, model_sql_path, gt_record_path, model_record_path
-    )                  
+    )
+
+    print("\n=== Sample SQL Errors ===")
+    error_count = 0
+    for i, msg in enumerate(error_msgs):
+        if msg != "" and error_count < 5:
+            print(f"{i+1}. Error: {msg}")
+            print(f"    Query: [{sql_results[i]}]")
+            error_count += 1
+    print("=" * 60 + "\n")                  
     
     total_error = sum(1 for msg in error_msgs if msg!="")
     total_queries = len(error_msgs)
@@ -211,8 +233,10 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
             generated_ids = model.generate(
                 input_ids=encoder_input,
                 attention_mask=encoder_mask,
-                max_length=args.max_gen_length,
-                num_beams=args.num_beams
+                max_length = 512,
+                early_stopping=True,
+                num_beams= 4,
+                decoder_start_token_id=initial_decoder[0].item()
             )
             
             for gen_ids in generated_ids:
@@ -245,8 +269,8 @@ def main():
     model_type = 'ft' if args.finetune else 'scr'
     gt_sql_path = os.path.join(f'data/dev.sql')
     gt_record_path = os.path.join(f'records/dev_gt_records.pkl')
-    model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
-    model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
+    model_sql_path = os.path.join(f'results/t5_{model_type}_{args.experiment_name}_dev.sql')
+    model_record_path = os.path.join(f'records/t5_{model_type}_{args.experiment_name}_dev.pkl')
     dev_loss, dev_record_em, dev_record_f1, dev_sql_em, dev_error_rate = eval_epoch(args, model, dev_loader,
                                                                                     gt_sql_path, model_sql_path,
                                                                                     gt_record_path, model_record_path)

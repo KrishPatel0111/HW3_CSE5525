@@ -48,7 +48,7 @@ class T5Dataset(Dataset):
         if split=='test':
             
             for nl_in in data_in:
-                encoder_in = tokenizer(f"Convert the following English to SQL query: {nl_in}",truncation=True, max_length=512, return_tensors='pt')
+                encoder_in = tokenizer(f"translate English to SQL: {nl_in}",truncation=True, max_length=1024, return_tensors='pt')
                 decoder_begin = tokenizer.convert_tokens_to_ids([BOS])[0]
                 data.append({
                     'encoder_input_ids': encoder_in['input_ids'].squeeze(0),
@@ -58,7 +58,7 @@ class T5Dataset(Dataset):
         else:
             
             for nl_in, sql_out in zip(data_in, data_out):
-                encoder_in = tokenizer(f"Convert the following English to SQL query: {nl_in}", truncation=True, max_length=512 , return_tensors='pt')
+                encoder_in = tokenizer(f"translate English to SQL: {nl_in}", truncation=True, max_length=1024 , return_tensors='pt')
                 decoder_out = tokenizer(sql_out, return_tensors='pt')
                 decoder_begin = tokenizer.convert_tokens_to_ids([BOS])[0]
                 decoder_input_ids = torch.cat([torch.tensor([decoder_begin]), decoder_out['input_ids'].squeeze(0)])
