@@ -229,6 +229,24 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
             encoder_input = encoder_input.to(DEVICE)
             encoder_mask = encoder_mask.to(DEVICE)
             initial_decoder_input = initial_decoder.to(DEVICE)
+
+            gen_kwargs = {
+                "input_ids": encoder_input,
+                "attention_mask": encoder_mask,
+                "early_stopping": True,
+                "max_length": 512,
+                "num_beams": 4,
+                "decoder_start_token_id": initial_decoder[0].item(),
+            }
+
+            if not args.finetune:
+                gen_kwargs.update({
+                    "repetition_penalty": 1.2,
+                    "no_repeat_ngram_size": 3
+                })
+
+            generated_ids = model.generate(**gen_kwargs)
+
             
             generated_ids = model.generate(
                 input_ids=encoder_input,

@@ -1,4 +1,4 @@
-import os, argparse, random
+import os, argparse, random, re
 from tqdm import tqdm
 
 import torch
@@ -7,105 +7,156 @@ from transformers import GemmaTokenizer, AutoModelForCausalLM
 from transformers import BitsAndBytesConfig
 
 from utils import set_random_seeds, compute_metrics, save_queries_and_records, compute_records
-from prompting_utils import read_schema, extract_sql_query, save_logs
+from prompting_utils import read_schema, save_logs, extract_sql_query
 from load_data import load_prompting_data
 
-DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') # you can add mps
+DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+MAX_NEW_TOKENS = 250  # Increased - your SQL queries are long
 
+BOS = "<bos>"
+EOS = "<eos>"
 
 def get_args():
-    '''
-    Arguments for prompting. You may choose to change or extend these as you see fit.
-    '''
-    parser = argparse.ArgumentParser(
-        description='Text-to-SQL experiments with prompting.')
-
-    parser.add_argument('-s', '--shot', type=int, default=0,
-                        help='Number of examples for k-shot learning (0 for zero-shot)')
-    parser.add_argument('-p', '--ptype', type=int, default=0,
-                        help='Prompt type')
-    parser.add_argument('-m', '--model', type=str, default='gemma',
-                        help='Model to use for prompting: gemma (gemma-1.1-2b-it) or codegemma (codegemma-7b-it)')
-    parser.add_argument('-q', '--quantization', action='store_true',
-                        help='Use a quantized version of the model (e.g. 4bits)')
-
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed to help reproducibility')
-    parser.add_argument('--experiment_name', type=str, default='experiment',
-                        help="How should we name this experiment?")
+    parser = argparse.ArgumentParser(description='Text-to-SQL experiments with prompting.')
+    parser.add_argument('-s', '--shot', type=int, default=0)
+    parser.add_argument('-p', '--ptype', type=int, default=0)
+    parser.add_argument('-m', '--model', type=str, default='gemma')
+    parser.add_argument('-q', '--quantization', action='store_true')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--experiment_name', type=str, default='experiment')
     args = parser.parse_args()
     return args
 
 
-def create_prompt(sentence, k):
+def create_prompt(sentence, k, train_x=None, train_y=None, schema=None, ptype=0):
     '''
-    Function for creating a prompt for zero or few-shot prompting.
-
-    Add/modify the arguments as needed.
-
-    Inputs:
-        * sentence (str): A text string
-        * k (int): Number of examples in k-shot prompting
+    FIXED: Simpler prompt structure
     '''
-    # TODO
+    # Simple instruction
+    if ptype == 0:
+        # Simple: 1 sentence
+        instruct = "Convert English questions to SQL queries.\n\n"
+        
+    elif ptype == 1:
+        # Moderate: 2-3 sentences
+        instruct = "Convert English questions to SQL queries for a flight database. Use proper SQL syntax with correct table joins and aliases. Output only the SQL query.\n\n"
+        
+    else:  # ptype == 2 or higher
+        # Detailed: 4-5 sentences
+        instruct = "Convert English questions to SQL queries for a flight database. Use proper SQL syntax with SELECT, FROM, WHERE, and JOIN clauses. Always use table aliases like flight_1, city_1, airport_service_1, etc. Join tables correctly through their foreign key relationships. End all queries with a semicolon.\n\n"
+        
+        # Optionally add schema for detailed prompt
+        if schema:
+            instruct += f"Schema: {schema[:300]}\n\n"
+    
+    # Add few-shot examples
+    if k > 0 and train_x and train_y:
+        # Use first k examples (consistent)
+        for idx in range(min(k, len(train_x))):
+            sql = train_y[idx].strip()
+            if not sql.endswith(';'):
+                sql += ';'
+            instruct += f"{train_x[idx]}\n{sql}\n\n"
+    
+    # Current question
+    instruct += sentence
+
+    return instruct
 
 
-def exp_kshot(tokenizer, model, inputs, k):
+def exp_kshot(tokenizer, model, inputs, k, train_x=None, train_y=None, 
+              schema=None, ptype=0, ground_truth=None):  # ADD ground_truth parameter
     '''
-    k-shot prompting experiments using the provided model and tokenizer. 
-    This function generates SQL queries from text prompts and evaluates their accuracy.
-
-    Add/modify the arguments and code as needed.
-
-    Inputs:
-        * tokenizer
-        * model
-        * inputs (List[str]): A list of text strings
-        * k (int): Number of examples in k-shot prompting
+    k-shot prompting with debugging
     '''
     raw_outputs = []
     extracted_queries = []
 
     for i, sentence in tqdm(enumerate(inputs)):
-        prompt = create_prompt(sentence, k) # Looking at the prompt may also help
+        prompt = create_prompt(sentence, k, train_x, train_y, schema, ptype)
 
-        input_ids = tokenizer(prompt, return_tensors="pt").to(DEVICE)
-        outputs = model.generate(**input_ids, max_new_tokens=MAX_NEW_TOKENS) # You should set MAX_NEW_TOKENS
-        response = tokenizer.decode(outputs[0]) # How does the response look like? You may need to parse it
+        # DEBUG: Print prompt info for first example only
+        if i == 0:
+            print(f"\n{'='*80}")
+            print(f"PROMPT LENGTH: {len(prompt)} chars")
+            print(f"NUMBER OF EXAMPLES: {k}")
+            print(f"FIRST 500 CHARS:")
+            print(prompt[:500])
+            print(f"LAST 300 CHARS:")
+            print(prompt[-300:])
+            print(f"{'='*80}\n")
+
+        input_ids = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(DEVICE)
+        
+        # DEBUG: Check truncation
+        if i == 0:
+            print(f"TOKENIZED LENGTH: {input_ids['input_ids'].shape[1]} tokens")
+            if input_ids['input_ids'].shape[1] >= 2048:
+                print("⚠️  WARNING: PROMPT TRUNCATED! Examples may be cut off!\n")
+        
+        outputs = model.generate(
+            **input_ids, 
+            max_new_tokens=MAX_NEW_TOKENS,
+            temperature=0.3,
+            do_sample=True,
+            top_p=0.95,
+            pad_token_id=tokenizer.pad_token_id
+        )
+        
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Remove prompt from response
+        if len(prompt) < len(response):
+            response = response[len(prompt):].strip()
+        
         raw_outputs.append(response)
-
-        # Extract the SQL query
         extracted_query = extract_sql_query(response)
         extracted_queries.append(extracted_query)
+        
+        # DEBUG: First 5 examples - THIS IS WHERE IT GOES
+        if i < 5:
+            print(f"\n{'─'*80}")
+            print(f"Example {i+1}")
+            print(f"{'─'*80}")
+            print(f"Question: {sentence}")
+            print(f"\nGenerated (first 200 chars):")
+            print(f"  {response[:200]}")
+            print(f"\nExtracted SQL:")
+            print(f"  {extracted_query[:150]}...")
+            
+            # THIS IS THE LINE YOU ASKED ABOUT - IT GOES HERE
+            if ground_truth:
+                print(f"\nGround Truth:")
+                print(f"  {ground_truth[i][:150]}...")
+            
+            print(f"{'─'*80}")
+    
     return raw_outputs, extracted_queries
 
 
-def eval_outputs(eval_x, eval_y, gt_sql_pth, model_sql_path, gt_record_path, model_record_path):
+def eval_outputs(eval_x, eval_y, gt_sql_pth, model_sql_path, gt_record_path, model_record_path, extracted_queries):
     '''
-    Evaluate the outputs of the model by computing the metrics.
-
-    Add/modify the arguments and code as needed.
+    FIXED: Save extracted_queries, not eval_y!
     '''
-    # TODO
-    return sql_em, record_em, record_f1, model_error_msgs, error_rate
+    # CRITICAL FIX: Save the EXTRACTED queries, not ground truth!
+    save_queries_and_records(extracted_queries, model_sql_path, model_record_path)
+    
+    sql_em, record_em, record_f1, error_msgs = compute_metrics(
+        gt_sql_pth, model_sql_path, gt_record_path, model_record_path
+    )
+    
+    error_rate = sum(1 for msg in error_msgs if msg != "") / len(error_msgs) if len(error_msgs) > 0 else 0
+    
+    return sql_em, record_em, record_f1, error_msgs, error_rate
 
 
 def initialize_model_and_tokenizer(model_name, to_quantize=False):
-    '''
-    Args:
-        * model_name (str): Model name ("gemma" or "codegemma").
-        * to_quantize (bool): Use a quantized version of the model (e.g. 4bits)
-    
-    To access to the model on HuggingFace, you need to log in and review the 
-    conditions and access the model's content.
-    '''
     if model_name == "gemma":
         model_id = "google/gemma-1.1-2b-it"
         tokenizer = GemmaTokenizerFast.from_pretrained(model_id)
-        # Native weights exported in bfloat16 precision, but you can use a different precision if needed
         model = GemmaForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16, 
+            torch_dtype=torch.bfloat16
         ).to(DEVICE)
     elif model_name == "codegemma":
         model_id = "google/codegemma-7b-it"
@@ -113,68 +164,86 @@ def initialize_model_and_tokenizer(model_name, to_quantize=False):
         if to_quantize:
             nf4_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_quant_type="nf4", # 4-bit quantization
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16
             )
-            model = AutoModelForCausalLM.from_pretrained(model_id,
-                                                        torch_dtype=torch.bfloat16,
-                                                        config=nf4_config).to(DEVICE)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                quantization_config=nf4_config,
+                device_map="auto"
+            )
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_id,
-                                                        torch_dtype=torch.bfloat16).to(DEVICE)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch.bfloat16
+            ).to(DEVICE)
+    
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
     return tokenizer, model
 
 
 def main():
-    '''
-    Note: this code serves as a basic template for the prompting task. You can but 
-    are not required to use this pipeline.
-    You can design your own pipeline, and you can also modify the code below.
-    '''
     args = get_args()
-    shot = args.shot
-    ptype = args.ptype
-    model_name = args.model
-    to_quantize = args.quantization
-    experiment_name = args.experiment_name
-
     set_random_seeds(args.seed)
+    
+    os.makedirs('results', exist_ok=True)
+    os.makedirs('records', exist_ok=True)
+    os.makedirs('logs', exist_ok=True)
 
     data_folder = 'data'
     train_x, train_y, dev_x, dev_y, test_x = load_prompting_data(data_folder)
 
-    # Model and tokenizer
-    tokenizer, model = initialize_model_and_tokenizer(model_name, to_quantize)
+    schema = None
+    if args.ptype in [1, 2]:
+        schema_path = os.path.join(data_folder, 'flight_database.schema')
+        if os.path.exists(schema_path):
+            schema = read_schema(schema_path)
+
+    tokenizer, model = initialize_model_and_tokenizer(args.model, args.quantization)
 
     for eval_split in ["dev", "test"]:
         eval_x, eval_y = (dev_x, dev_y) if eval_split == "dev" else (test_x, None)
 
-        raw_outputs, extracted_queries = exp_kshot(tokenizer, model, eval_x, k)
-
-        # You can add any post-processing if needed
-        # You can compute the records with `compute_records``
-
-        gt_query_records = f"records/{eval_split}_gt_records.pkl"
-        gt_sql_path = os.path.join(f'data/{eval_split}.sql')
-        gt_record_path = os.path.join(f'records/{eval_split}_gt_records.pkl')
-        model_sql_path = os.path.join(f'results/gemma_{experiment_name}_dev.sql')
-        model_record_path = os.path.join(f'records/gemma_{experiment_name}_dev.pkl')
-        sql_em, record_em, record_f1, model_error_msgs, error_rate = eval_outputs(
-            eval_x, eval_y,
-            gt_path=gt_sql_path,
-            model_path=model_sql_path,
-            gt_query_records=gt_query_records,
-            model_query_records=model_record_path
+        print(f"\n{'='*10}")
+        print(f"Processing {eval_split} set...")
+        print(f"{'='*10}")
+        
+        raw_outputs, extracted_queries = exp_kshot(
+            tokenizer, model, eval_x, args.shot, train_x, train_y, schema, args.ptype,  ground_truth=eval_y
         )
-        print(f"{eval_split} set results: ")
-        print(f"Record F1: {record_f1}, Record EM: {record_em}, SQL EM: {sql_em}")
-        print(f"{eval_split} set results: {error_rate*100:.2f}% of the generated outputs led to SQL errors")
 
-        # Save results
-        # You can for instance use the `save_queries_and_records` function
+        model_sql_path = f'results/{args.model}_{args.experiment_name}_{eval_split}.sql'
+        model_record_path = f'records/{args.model}_{args.experiment_name}_{eval_split}.pkl'
 
-        # Save logs, if needed
-        log_path = "" # to specify
-        save_logs(log_path, sql_em, record_em, record_f1, model_error_msgs)
+        if eval_split == "dev":
+            gt_sql_path = f'data/{eval_split}.sql'
+            gt_record_path = f'records/{eval_split}_gt_records.pkl'
+
+            sql_em, record_em, record_f1, model_error_msgs, error_rate = eval_outputs(
+                eval_x, eval_y,
+                gt_sql_pth=gt_sql_path,
+                model_sql_path=model_sql_path,
+                gt_record_path=gt_record_path,
+                model_record_path=model_record_path,
+                extracted_queries=extracted_queries
+            )
+            
+            print(f"\n{'='*10}")
+            print(f"RESULTS - {eval_split.upper()}")
+            print(f"{'='*10}")
+            print(f"Record F1: {record_f1:.4f}")
+            print(f"Record EM: {record_em:.4f}")
+            print(f"SQL EM: {sql_em:.4f}")
+            print(f"Error rate: {error_rate*100:.2f}%")
+            print(f"{'='*10}\n")
+
+            log_path = f"logs/{args.model}_{args.experiment_name}_{eval_split}.log"
+            save_logs(log_path, sql_em, record_em, record_f1, model_error_msgs)
+        else:
+            save_queries_and_records(extracted_queries, model_sql_path, model_record_path)
+            print(f"{eval_split} set: Predictions saved to {model_sql_path}")
 
 
 if __name__ == "__main__":
