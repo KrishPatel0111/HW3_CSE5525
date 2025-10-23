@@ -11,7 +11,7 @@ from prompting_utils import read_schema, save_logs, extract_sql_query
 from load_data import load_prompting_data
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-MAX_NEW_TOKENS = 250  # Increased - your SQL queries are long
+MAX_NEW_TOKENS = 250  
 
 BOS = "<bos>"
 EOS = "<eos>"
@@ -29,53 +29,42 @@ def get_args():
 
 
 def create_prompt(sentence, k, train_x=None, train_y=None, schema=None, ptype=0):
-    '''
-    FIXED: Simpler prompt structure
-    '''
-    # Simple instruction
     if ptype == 0:
-        # Simple: 1 sentence
         instruct = "Convert English questions to SQL queries.\n\n"
         
     elif ptype == 1:
-        # Moderate: 2-3 sentences
         instruct = "Convert English questions to SQL queries for a flight database. Use proper SQL syntax with correct table joins and aliases. Output only the SQL query.\n\n"
         
-    else:  # ptype == 2 or higher
-        # Detailed: 4-5 sentences
+    else:  
         instruct = "Convert English questions to SQL queries for a flight database. Use proper SQL syntax with SELECT, FROM, WHERE, and JOIN clauses. Always use table aliases like flight_1, city_1, airport_service_1, etc. Join tables correctly through their foreign key relationships. End all queries with a semicolon.\n\n"
         
-        # Optionally add schema for detailed prompt
         if schema:
             instruct += f"Schema: {schema[:300]}\n\n"
     
-    # Add few-shot examples
+   
     if k > 0 and train_x and train_y:
-        # Use first k examples (consistent)
+        
         for idx in range(min(k, len(train_x))):
             sql = train_y[idx].strip()
             if not sql.endswith(';'):
                 sql += ';'
             instruct += f"{train_x[idx]}\n{sql}\n\n"
     
-    # Current question
     instruct += sentence
 
     return instruct
 
 
 def exp_kshot(tokenizer, model, inputs, k, train_x=None, train_y=None, 
-              schema=None, ptype=0, ground_truth=None):  # ADD ground_truth parameter
-    '''
-    k-shot prompting with debugging
-    '''
+              schema=None, ptype=0, ground_truth=None):  
+
     raw_outputs = []
     extracted_queries = []
 
     for i, sentence in tqdm(enumerate(inputs)):
         prompt = create_prompt(sentence, k, train_x, train_y, schema, ptype)
 
-        # DEBUG: Print prompt info for first example only
+        
         if i == 0:
             print(f"\n{'='*80}")
             print(f"PROMPT LENGTH: {len(prompt)} chars")
@@ -88,7 +77,7 @@ def exp_kshot(tokenizer, model, inputs, k, train_x=None, train_y=None,
 
         input_ids = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(DEVICE)
         
-        # DEBUG: Check truncation
+        
         if i == 0:
             print(f"TOKENIZED LENGTH: {input_ids['input_ids'].shape[1]} tokens")
             if input_ids['input_ids'].shape[1] >= 2048:
@@ -105,7 +94,7 @@ def exp_kshot(tokenizer, model, inputs, k, train_x=None, train_y=None,
         
         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Remove prompt from response
+        
         if len(prompt) < len(response):
             response = response[len(prompt):].strip()
         
@@ -113,7 +102,7 @@ def exp_kshot(tokenizer, model, inputs, k, train_x=None, train_y=None,
         extracted_query = extract_sql_query(response)
         extracted_queries.append(extracted_query)
         
-        # DEBUG: First 5 examples - THIS IS WHERE IT GOES
+        
         if i < 5:
             print(f"\n{'─'*80}")
             print(f"Example {i+1}")
@@ -124,7 +113,7 @@ def exp_kshot(tokenizer, model, inputs, k, train_x=None, train_y=None,
             print(f"\nExtracted SQL:")
             print(f"  {extracted_query[:150]}...")
             
-            # THIS IS THE LINE YOU ASKED ABOUT - IT GOES HERE
+            
             if ground_truth:
                 print(f"\nGround Truth:")
                 print(f"  {ground_truth[i][:150]}...")
@@ -135,10 +124,7 @@ def exp_kshot(tokenizer, model, inputs, k, train_x=None, train_y=None,
 
 
 def eval_outputs(eval_x, eval_y, gt_sql_pth, model_sql_path, gt_record_path, model_record_path, extracted_queries):
-    '''
-    FIXED: Save extracted_queries, not eval_y!
-    '''
-    # CRITICAL FIX: Save the EXTRACTED queries, not ground truth!
+    
     save_queries_and_records(extracted_queries, model_sql_path, model_record_path)
     
     sql_em, record_em, record_f1, error_msgs = compute_metrics(
@@ -151,6 +137,7 @@ def eval_outputs(eval_x, eval_y, gt_sql_pth, model_sql_path, gt_record_path, mod
 
 
 def initialize_model_and_tokenizer(model_name, to_quantize=False):
+
     if model_name == "gemma":
         model_id = "google/gemma-1.1-2b-it"
         tokenizer = GemmaTokenizerFast.from_pretrained(model_id)

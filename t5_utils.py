@@ -41,14 +41,12 @@ def mkdir(dirpath):
             pass
 
 def save_model(checkpoint_dir, model, best):
-    # Save model checkpoint to be able to load the model later
     mkdir(checkpoint_dir)
     checkpoint_path = os.path.join(checkpoint_dir, "best_model.pt" if best else "last_model.pt")
     torch.save(model.state_dict(), checkpoint_path)
     print(f"{'Best' if best else 'Last' } Model has been saved to {checkpoint_path}" )
 
 def load_model_from_checkpoint(args, best):
-    # Load model from a checkpoint
     model = initialize_model(args)
     model_type = 'ft' if args.finetune else 'scr'
     checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)

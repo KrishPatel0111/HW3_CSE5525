@@ -15,17 +15,14 @@ def extract_sql_query(response):
     '''
     Extract the SQL query from the model's response
     '''
-    # TODO
     response = response.replace(BOS, "").replace(EOS, "")
     response = response.replace('<s>', '').replace('</s>', '')
-    response = response.replace('<bos>', '').replace('<eos>', '')
     
-    # If "SQL:" exists, take everything after the LAST occurrence
+    
     if "SQL:" in response.upper():
         parts = response.upper().split("SQL:")
         response = parts[-1]
-    
-    # Try to extract SELECT query with semicolon
+
     match = re.search(r'(SELECT\s+.*?;)', response, re.DOTALL | re.IGNORECASE)
     query = match.group(1) if match else response
 
